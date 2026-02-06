@@ -1,0 +1,161 @@
+## clone repository
+
+mkdir -p analysis
+cd analysis
+
+## sym link so we do not change the repository itself
+mkdir -p raw_data
+cd raw_data
+tar -xvzf /config/workspace/datiesame/data_resequencing.tar.gz -C .
+cd ..
+mkdir -p alignment
+cd alignment
+
+## now we can perform the alignment with BWA
+
+bwa mem \
+-t 2 \
+-R "@RG\tID:sim\tSM:normal\tPL:illumina\tLB:sim" \
+/config/workspace/datiesame/reference_chr21/sequence/Homo_sapiens_assembly38_chr21.fasta \
+/config/workspace/analysis/raw_data/normal_1.000+disease_0.000_1.fq.gz \
+/config/workspace/analysis/raw_data/normal_1.000+disease_0.000_2.fq.gz \
+| samtools view -@ 8 -bhS -o normal.bam -
+
+## Real time: 176.099 sec; CPU: 256.669 sec
+
+bwa mem \
+-t 2 \
+-R "@RG\tID:sim\tSM:disease\tPL:illumina\tLB:sim" \
+/config/workspace/datiesame/reference_chr21/sequence/Homo_sapiens_assembly38_chr21.fasta \
+/config/workspace/analysis/raw_data/normal_0.000+disease_1.000_1.fq.gz \
+/config/workspace/analysis/raw_data/normal_0.000+disease_1.000_2.fq.gz \
+| samtools view -@ 8 -bhS -o disease.bam -
+
+## Real time: 173.232 sec; CPU: 256.204 sec
+
+
+# sort the bam file
+samtools sort -o normal_sorted.bam normal.bam
+samtools sort -o disease_sorted.bam disease.bam
+
+# index the bam file
+samtools index normal_sorted.bam
+samtools index disease_sorted.bam
+
+
+# Marking duplicates
+
+gatk MarkDuplicates \
+-I normal_sorted.bam \
+-M normal_metrics.txt \
+-O normal_md.bam
+
+gatk MarkDuplicates \
+-I disease_sorted.bam \
+-M disease_metrics.txt \
+-O disease_md.bam
+
+
+### recalibrating
+
+gatk BaseRecalibrator \
+   -I normal_md.bam \
+   -R /config/workspace/datiesame/reference_chr21/sequence/Homo_sapiens_assembly38_chr21.fasta \
+   --known-sites /config/workspace/datiesame/reference_chr21/gatkbundle/dbsnp_146.hg38_chr21.vcf.gz \
+   --known-sites /config/workspace/datiesame/reference_chr21/gatkbundle/Mills_and_1000G_gold_standard.indels.hg38_chr21.vcf.gz \
+   -O normal_recal_data.table
+
+gatk BaseRecalibrator \
+   -I disease_md.bam \
+   -R /config/workspace/datiesame/reference_chr21/sequence/Homo_sapiens_assembly38_chr21.fasta \
+   --known-sites /config/workspace/datiesame/reference_chr21/gatkbundle/dbsnp_146.hg38_chr21.vcf.gz \
+   --known-sites /config/workspace/datiesame/reference_chr21/gatkbundle/Mills_and_1000G_gold_standard.indels.hg38_chr21.vcf.gz \
+   -O disease_recal_data.table
+
+
+#### Apply recalibration
+
+gatk ApplyBQSR \
+   -R /config/workspace/datiesame/reference_chr21/sequence/Homo_sapiens_assembly38_chr21.fasta \
+   -I normal_md.bam \
+   --bqsr-recal-file normal_recal_data.table \
+   -O normal_recal.bam
+
+gatk ApplyBQSR \
+   -R /config/workspace/datiesame/reference_chr21/sequence/Homo_sapiens_assembly38_chr21.fasta \
+   -I disease_md.bam \
+   --bqsr-recal-file disease_recal_data.table \
+   -O disease_recal.bam
+
+
+
+### variant calling
+
+cd /config/workspace
+mkdir -p analysis/variants
+cd analysis/variants
+
+
+## first single sample discovery
+
+gatk --java-options "-Xmx4g" HaplotypeCaller  \
+   -R /config/workspace/datiesame/reference_chr21/sequence/Homo_sapiens_assembly38_chr21.fasta \
+   -I /config/workspace/analysis/alignment/normal_recal.bam \
+   -O normal.g.vcf.gz \
+   -ERC GVCF
+
+gatk --java-options "-Xmx4g" HaplotypeCaller  \
+   -R /config/workspace/datiesame/reference_chr21/sequence/Homo_sapiens_assembly38_chr21.fasta \
+   -I /config/workspace/analysis/alignment/disease_recal.bam \
+   -O disease.g.vcf.gz \
+   -ERC GVCF
+
+## then consolidate the 2 files
+
+mkdir -p tmp
+
+gatk --java-options "-Xmx4g -Xms4g" GenomicsDBImport \
+      -V normal.g.vcf.gz \
+      -V disease.g.vcf.gz \
+      --genomicsdb-workspace-path compared_db \
+      --tmp-dir /config/workspace/analysis/variants/tmp \
+      -L chr21
+
+### finally we can call the genotypes jointly
+gatk --java-options "-Xmx4g" GenotypeGVCFs \
+   -R /workspaces/class-variantcalling/reference_chr21/sequence/Homo_sapiens_assembly38_chr21.fasta \
+   -V gendb://compared_db \
+   --dbsnp /config/workspace/reference_chr21/gatkbundle/dbsnp_146.hg38_chr21.vcf.gz \
+   -O results.vcf.gz
+
+
+
+#### ANNOTATE THE SAMPLE
+
+mkdir -p /config/workspace/analysis/variants/cache
+cd /config/workspace/analysis/variants
+
+### to execute snpeff we need to contain the memory
+snpEff -Xmx4g ann -v hg38 results.vcf.gz >results_ann.vcf
+
+
+### filter variants
+
+cat results_ann.vcf | grep "#CHROM" | cut -f 10-
+
+## use SNPsift to filter those with impact HIGH where the control is homozygous for reference and case is either 
+## heterozygous or homozygous for the alternative allele
+
+SnpSift filter "ANN[0].IMPACT = 'HIGH' && isRef(GEN[1]) && (isVariant(GEN[0]) | isHom(GEN[0]))" results_ann.vcf >filtered_variants.vcf
+
+SnpSift extractFields \
+-s "," -e "." \
+filtered_variants.vcf \
+"CHROM" "POS" "ID" "GEN[disease].GT" "GEN[normal].GT" ANN[*].GENE ANN[*].EFFECT \
+| column -t
+
+SnpSift extractFields \
+-s "," -e "." \
+filtered_variants.vcf \
+"CHROM" "POS" "ID" "REF" "ALT" "GEN[*].GT" ANN[0].GENE ANN[0].EFFECT \
+| column -t
