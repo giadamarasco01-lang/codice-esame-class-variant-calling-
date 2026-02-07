@@ -123,9 +123,9 @@ gatk --java-options "-Xmx4g -Xms4g" GenomicsDBImport \
 
 ### finally we can call the genotypes jointly
 gatk --java-options "-Xmx4g" GenotypeGVCFs \
-   -R /workspaces/class-variantcalling/reference_chr21/sequence/Homo_sapiens_assembly38_chr21.fasta \
+   -R /config/workspaces/datiesame/reference_chr21/sequence/Homo_sapiens_assembly38_chr21.fasta \
    -V gendb://compared_db \
-   --dbsnp /config/workspace/reference_chr21/gatkbundle/dbsnp_146.hg38_chr21.vcf.gz \
+   --dbsnp /config/workspace/datiesame/reference_chr21/gatkbundle/dbsnp_146.hg38_chr21.vcf.gz \
    -O results.vcf.gz
 
 
